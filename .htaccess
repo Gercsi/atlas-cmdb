@@ -1,0 +1,8 @@
+Require local
+Options -Indexes
+RewriteEngine On
+RewriteRule (^|/)\. - [F,L]
+RewriteRule ^(?:src|vendor|work|tests|documentation|frontend)/ - [F,L]
+RewriteRule ^(?:composer|package|pnpm-lock|vite.config|tsconfig|README|\.env) - [F,L]
+RewriteRule ^$ public/ [L]
+RewriteRule ^(?:config\.|install\.php|backup\.php|maintenance\.php|console\.php|worker\.php|Start-CMDB\.ps1|\.php-cs-fixer) - [F,L]

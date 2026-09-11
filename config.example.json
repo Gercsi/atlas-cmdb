@@ -1,0 +1,10 @@
+{
+  "dsn": "mysql:host=127.0.0.1;port=3306;dbname=atlas;charset=utf8mb4",
+  "db_user": "atlas_runtime",
+  "db_password": "REPLACE_WITH_RANDOM_SECRET",
+  "storage": "C:/xampp/atlas-private",
+  "source": null,
+  "export_retention_hours": 24,
+  "import_retention_days": 90,
+  "audit_retention_days": 365
+}

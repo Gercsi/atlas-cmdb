@@ -1,0 +1,6 @@
+Require local
+Options -Indexes
+DirectoryIndex index.html
+<FilesMatch "^(router|extra-routes)\.php$">
+Require all denied
+</FilesMatch>

@@ -1,0 +1,17 @@
+# Private configuration and secrets
+config.json
+application.key
+.env
+.env.*
+
+# Runtime data
+sessions/
+imports/
+exports/
+backups/
+processes.json
+*.log
+
+# Local operating-system files
+Thumbs.db
+.DS_Store
