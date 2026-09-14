@@ -2,10 +2,14 @@
 param(
     [string]$Repository = 'https://github.com/Gercsi/atlas-cmdb.git',
     [ValidatePattern('^[A-Za-z0-9._/-]+$')][string]$Branch = 'main',
-    [string]$TargetPath = 'C:\xampp\htdocs\Atlas-cmdb',
-    [ValidateRange(1, 65535)][int]$Port = 8088,
+    [string]$ApacheRoot = 'C:\Apache24',
+    [string]$TargetPath = '',
+    [string]$VHostPath = '',
+    [ValidatePattern('^[A-Za-z0-9.-]+$')][string]$ServerName = 'atlas-cmdb.local',
+    [ValidateRange(1, 65535)][int]$Port = 80,
     [string]$Config = '',
-    [string]$Php = 'C:\xampp\php\php.exe',
+    [string]$Php = '',
+    [string]$ApacheServiceName = 'Apache2.4',
     [switch]$SkipBackup,
     [switch]$NoRestart,
     [switch]$Force,
@@ -40,122 +44,173 @@ function Normalize-Repository {
     return $value
 }
 
-function Get-DefaultConfigPath {
-    param([Parameter(Mandatory)][string]$Target)
-    $projectParent = Split-Path -Parent $Target
-    $privateBase = $projectParent
-    if ((Split-Path -Leaf $projectParent).ToLowerInvariant() -in @('htdocs', 'www', 'html', 'wwwroot')) {
-        $privateBase = Split-Path -Parent $projectParent
+function Resolve-Php {
+    param([string]$Requested, [string]$Root)
+    $candidates = @($Requested, (Join-Path $Root 'php\php.exe'), 'C:\php\php.exe', 'C:\xampp\php\php.exe') | Where-Object { $_ }
+    foreach ($candidate in $candidates) {
+        if (Test-Path -LiteralPath $candidate -PathType Leaf) { return [IO.Path]::GetFullPath($candidate) }
     }
-    return Join-Path $privateBase ((Split-Path -Leaf $Target) + '-private\config.json')
+    throw 'A PHP nem található. Add meg a -Php paraméterrel a php.exe útvonalát.'
 }
 
-function Stop-AtlasProcesses {
-    param(
-        [Parameter(Mandatory)][string]$Storage,
-        [Parameter(Mandatory)][string]$Target
-    )
+function Test-Administrator {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Stop-AtlasWorker {
+    param([Parameter(Mandatory)][string]$Storage, [Parameter(Mandatory)][string]$Target)
     $processFile = Join-Path $Storage 'processes.json'
-    if (-not (Test-Path -LiteralPath $processFile)) { return 0 }
+    if (-not (Test-Path -LiteralPath $processFile)) { return $false }
     try { $record = Get-Content -LiteralPath $processFile -Raw | ConvertFrom-Json }
-    catch { Write-Warning 'A processes.json nem olvasható; nem állítottunk le folyamatot.'; return 0 }
+    catch { Write-Warning 'A processes.json nem olvasható; a workert nem állítottuk le.'; return $false }
     if (-not $record.PSObject.Properties['project'] -or (Normalize-Path ([string]$record.project)) -ne (Normalize-Path $Target)) {
-        Write-Warning 'A processes.json másik projektet jelöl; nem állítottunk le folyamatot.'
-        return 0
+        Write-Warning 'A processes.json másik projektet jelöl; a workert nem állítottuk le.'
+        return $false
     }
+    $workerProperty = $record.PSObject.Properties['worker']
+    if (-not $workerProperty) { return $false }
+    $processId = [int]$workerProperty.Value
+    $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+    if (-not $process -or $process.ProcessName -ne 'php') { return $false }
     $recordedAt = (Get-Item -LiteralPath $processFile).LastWriteTime
-    $stopped = 0
-    foreach ($entry in @(@('server', 'public/router.php'), @('worker', 'worker.php'))) {
-        $property = $record.PSObject.Properties[$entry[0]]
-        if (-not $property) { continue }
-        $processId = [int]$property.Value
-        $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
-        if (-not $process -or $process.ProcessName -ne 'php') { continue }
-        if ($process.StartTime -gt $recordedAt.AddSeconds(5)) {
-            Write-Warning "A(z) $processId folyamata újabb a folyamatleírónál; nem állítottuk le."
-            continue
-        }
-        $command = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
-        if (-not $command -or ([string]$command.CommandLine) -notlike "*$($entry[1])*") {
-            Write-Warning "A(z) $processId folyamata nem azonosítható Atlas-folyamatként; nem állítottuk le."
-            continue
-        }
-        Stop-Process -Id $processId
-        $stopped++
+    $command = Get-CimInstance Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+    if ($process.StartTime -gt $recordedAt.AddSeconds(5) -or -not $command -or ([string]$command.CommandLine) -notlike '*worker.php*') {
+        Write-Warning "A(z) $processId folyamata nem azonosítható Atlas-workerként; nem állítottuk le."
+        return $false
     }
-    return $stopped
+    Stop-Process -Id $processId
+    return $true
 }
 
-function Start-Atlas {
+function Start-AtlasWorker {
     param(
         [Parameter(Mandatory)][string]$Target,
         [Parameter(Mandatory)][string]$PhpPath,
-        [Parameter(Mandatory)][int]$ListenPort,
-        [string]$ConfigPath = ''
+        [Parameter(Mandatory)][string]$Storage,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][int]$ListenPort
     )
-    $arguments = @('-Port', $ListenPort, '-Php', $PhpPath)
-    if ($ConfigPath) { $arguments += @('-Config', $ConfigPath) }
-    & (Join-Path $Target 'Start-CMDB.ps1') @arguments
+    $worker = Start-Process -FilePath $PhpPath -ArgumentList @('-d', 'extension=zip', '-d', 'extension=gd', 'worker.php') -WorkingDirectory $Target -RedirectStandardOutput (Join-Path $Storage 'worker-out.log') -RedirectStandardError (Join-Path $Storage 'worker-error.log') -WindowStyle Hidden -PassThru
+    @{
+        worker = $worker.Id
+        project = $Target
+        mode = 'apache'
+        server_name = $HostName
+        port = $ListenPort
+    } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Storage 'processes.json')
+}
+
+function New-VHostContent {
+    param(
+        [Parameter(Mandatory)][string]$DocumentRoot,
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$HostName,
+        [Parameter(Mandatory)][int]$ListenPort,
+        [Parameter(Mandatory)][string]$LogsDirectory
+    )
+    $document = $DocumentRoot.Replace('\', '/')
+    $configuration = $ConfigPath.Replace('\', '/')
+    $logs = $LogsDirectory.Replace('\', '/')
+    return @"
+# Atlas CMDB virtual host
+# A PHP-kezelőt (mod_php vagy FastCGI) az Apache globális konfigurációjában kell beállítani.
+<VirtualHost *:$ListenPort>
+    ServerName $HostName
+    DocumentRoot "$document"
+    DirectoryIndex index.html
+
+    SetEnv CMDB_CONFIG "$configuration"
+    SetEnv CMDB_ALLOWED_HOSTS "$HostName"
+
+    <Directory "$document">
+        Options -Indexes
+        AllowOverride All
+        Require local
+    </Directory>
+
+    ErrorLog "$logs/atlas-cmdb-error.log"
+    CustomLog "$logs/atlas-cmdb-access.log" combined
+</VirtualHost>
+"@
+}
+
+function Restart-Apache {
+    param([Parameter(Mandatory)][string]$ServiceName)
+    $service = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if (-not $service) {
+        throw "Az Apache szolgáltatás nem található: $ServiceName. Telepítsd szolgáltatásként, vagy add meg az -ApacheServiceName paramétert."
+    }
+    if ($service.Status -eq 'Running') { Restart-Service -Name $ServiceName -Force }
+    else { Start-Service -Name $ServiceName }
+    (Get-Service -Name $ServiceName).WaitForStatus('Running', [TimeSpan]::FromSeconds(30))
 }
 
 function Wait-Atlas {
-    param([Parameter(Mandatory)][int]$ListenPort)
-    $uri = "http://127.0.0.1:$ListenPort/api/v1/session"
+    param([Parameter(Mandatory)][string]$HostName, [Parameter(Mandatory)][int]$ListenPort)
+    $portSuffix = if ($ListenPort -eq 80) { '' } else { ":$ListenPort" }
+    $uri = "http://$HostName$portSuffix/api.php?r=session"
     for ($attempt = 1; $attempt -le 30; $attempt++) {
         try {
             $response = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 2
-            if ($response.StatusCode -eq 200) { return }
-        } catch {
-            Start-Sleep -Seconds 1
-        }
+            if ($response.StatusCode -eq 200) { return $uri }
+        } catch { Start-Sleep -Seconds 1 }
     }
     throw "Az alkalmazás 30 másodpercen belül nem válaszolt: $uri"
 }
 
 $gitCommand = Get-Command git -ErrorAction SilentlyContinue
 if (-not $gitCommand) { throw 'A Git nem található a PATH változóban.' }
-if (-not (Test-Path -LiteralPath $Php -PathType Leaf)) { throw "A PHP nem található: $Php" }
+$apache = [IO.Path]::GetFullPath($ApacheRoot).TrimEnd('\', '/')
+$target = if ($TargetPath) { [IO.Path]::GetFullPath($TargetPath).TrimEnd('\', '/') } else { Join-Path $apache 'htdocs\Atlas-cmdb' }
+$vhost = if ($VHostPath) { [IO.Path]::GetFullPath($VHostPath) } else { Join-Path $apache 'conf\extra\atlas-cmdb.conf' }
+$httpdConfig = Join-Path $apache 'conf\httpd.conf'
+$httpd = Join-Path $apache 'bin\httpd.exe'
+$phpPath = Resolve-Php -Requested $Php -Root $apache
+$configPath = if ($Config) { [IO.Path]::GetFullPath($Config) } else { Join-Path $apache 'Atlas-cmdb-private\config.json' }
+$documentRoot = Join-Path $target 'public'
 
-$target = [IO.Path]::GetFullPath($TargetPath).TrimEnd('\', '/')
+foreach ($required in @($apache, (Join-Path $apache 'htdocs'), (Join-Path $apache 'conf'), $httpdConfig, $httpd)) {
+    if (-not (Test-Path -LiteralPath $required)) { throw "Hiányzó Apache-összetevő: $required" }
+}
 $targetRoot = [IO.Path]::GetPathRoot($target).TrimEnd('\', '/')
 if (-not $target -or $target -eq $targetRoot) { throw 'A célmappa nem lehet meghajtógyökér.' }
-$configPath = if ($Config) { [IO.Path]::GetFullPath($Config) } else { Get-DefaultConfigPath $target }
-$targetExists = Test-Path -LiteralPath $target
-$isRepository = $targetExists -and (Test-Path -LiteralPath (Join-Path $target '.git'))
+if (-not $DryRun -and -not (Test-Administrator)) { throw 'A deployt rendszergazdaként indított PowerShellből futtasd.' }
 
 Invoke-Native -FilePath $gitCommand.Source -Arguments @('ls-remote', '--exit-code', '--heads', $Repository, "refs/heads/$Branch") -Description 'A távoli ág ellenőrzése' | Out-Null
-
+$targetExists = Test-Path -LiteralPath $target
+$isRepository = $targetExists -and (Test-Path -LiteralPath (Join-Path $target '.git'))
 if ($targetExists -and -not $isRepository) {
     throw "A célmappa létezik, de nem Git-repó: $target. Helyezd át, vagy válassz másik TargetPath értéket."
 }
-
 if ($isRepository) {
     $origin = (Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'remote', 'get-url', 'origin') -Description 'A távoli repó lekérdezése' | Select-Object -First 1).Trim()
-    if ((Normalize-Repository $origin) -ne (Normalize-Repository $Repository)) {
-        throw "A célmappa másik repóhoz tartozik: $origin"
-    }
+    if ((Normalize-Repository $origin) -ne (Normalize-Repository $Repository)) { throw "A célmappa másik repóhoz tartozik: $origin" }
     $changes = @(Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'status', '--porcelain') -Description 'A munkakönyvtár ellenőrzése')
-    if ($changes.Count -gt 0 -and -not $Force) {
-        throw 'A célmappában nem commitolt módosítások vannak. Ellenőrizd őket, vagy használd a -Force kapcsolót.'
-    }
+    if ($changes.Count -gt 0 -and -not $Force) { throw 'A célmappában nem commitolt módosítások vannak. Ellenőrizd őket, vagy használd a -Force kapcsolót.' }
 }
 
 Write-Host "Forrás: $Repository ($Branch)"
+Write-Host "Apache: $apache"
 Write-Host "Cél: $target"
+Write-Host "VHost: $vhost"
+Write-Host "Cím: http://$ServerName$(if ($Port -eq 80) { '' } else { ":$Port" })/"
 Write-Host "Konfiguráció: $configPath"
-if ($DryRun) {
-    Write-Host 'DryRun: a távoli ág és a helyi feltételek rendben vannak; nem történt módosítás.'
-    exit 0
-}
+if ($DryRun) { Write-Host 'DryRun: az előfeltételek rendben vannak; nem történt módosítás.'; exit 0 }
 
-$mutex = [Threading.Mutex]::new($false, 'Local\AtlasCMDBDeploy')
-if (-not $mutex.WaitOne(0)) { throw 'Már fut egy Atlas CMDB deploy.' }
+$mutex = [Threading.Mutex]::new($false, 'Local\AtlasCMDBApacheDeploy')
+if (-not $mutex.WaitOne(0)) { $mutex.Dispose(); throw 'Már fut egy Atlas CMDB deploy.' }
 $previousConfig = [Environment]::GetEnvironmentVariable('CMDB_CONFIG', 'Process')
 $hadConfig = Test-Path Env:CMDB_CONFIG
 $previousCommit = ''
 $updated = $false
-$stoppedProcesses = 0
-$startAttempted = $false
+$workerStopped = $false
+$workerStarted = $false
+$apacheConfigChanged = $false
+$vhostExisted = Test-Path -LiteralPath $vhost
+$vhostOriginal = if ($vhostExisted) { [IO.File]::ReadAllText($vhost) } else { '' }
+$httpdOriginal = [IO.File]::ReadAllText($httpdConfig)
 
 try {
     $env:CMDB_CONFIG = $configPath
@@ -163,64 +218,74 @@ try {
         $previousCommit = (Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'rev-parse', 'HEAD') -Description 'Az aktuális verzió lekérdezése' | Select-Object -First 1).Trim()
         if ((Test-Path -LiteralPath $configPath) -and -not $SkipBackup) {
             Write-Host 'Adatbázis- és konfigurációmentés készítése...'
-            Invoke-Native -FilePath $Php -Arguments @('-d', 'extension=zip', '-d', 'extension=gd', (Join-Path $target 'backup.php')) -Description 'A telepítés előtti mentés' | ForEach-Object { Write-Host $_ }
+            Invoke-Native -FilePath $phpPath -Arguments @('-d', 'extension=zip', '-d', 'extension=gd', (Join-Path $target 'backup.php')) -Description 'A telepítés előtti mentés' | ForEach-Object { Write-Host $_ }
         }
-        $storage = (& $Php (Join-Path $target 'console.php') storage-path)
+        $storage = (& $phpPath (Join-Path $target 'console.php') storage-path)
         if ($LASTEXITCODE -ne 0 -or -not $storage) { throw 'A privát tároló útvonala nem kérdezhető le.' }
-        $stoppedProcesses = Stop-AtlasProcesses -Storage ([string]$storage).Trim() -Target $target
-        if ($stoppedProcesses) { Write-Host "$stoppedProcesses Atlas-folyamat leállítva." }
+        $workerStopped = Stop-AtlasWorker -Storage ([string]$storage).Trim() -Target $target
         Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'fetch', '--prune', 'origin', $Branch) -Description 'A kiadás letöltése' | ForEach-Object { Write-Host $_ }
         Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'checkout', '-B', $Branch, "origin/$Branch") -Description 'A kiadási ág aktiválása' | ForEach-Object { Write-Host $_ }
-        if ($Force) {
-            Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'clean', '-fd') -Description 'Az idegen fájlok eltávolítása' | ForEach-Object { Write-Host $_ }
-        }
+        if ($Force) { Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'clean', '-fd') -Description 'Az idegen fájlok eltávolítása' | ForEach-Object { Write-Host $_ } }
         $updated = $true
     } else {
-        $parent = Split-Path -Parent $target
-        if (-not (Test-Path -LiteralPath $parent)) { New-Item -ItemType Directory -Path $parent | Out-Null }
         Invoke-Native -FilePath $gitCommand.Source -Arguments @('clone', '--depth', '1', '--branch', $Branch, '--single-branch', $Repository, $target) -Description 'Az alkalmazás letöltése' | ForEach-Object { Write-Host $_ }
         $updated = $true
     }
 
-    foreach ($required in @('vendor\autoload.php', 'public\index.html', 'src\App.php', 'Start-CMDB.ps1')) {
+    foreach ($required in @('vendor\autoload.php', 'public\index.html', 'src\App.php', 'worker.php')) {
         if (-not (Test-Path -LiteralPath (Join-Path $target $required))) { throw "Hiányos kiadás: $required" }
     }
 
+    $vhostDirectory = Split-Path -Parent $vhost
+    if (-not (Test-Path -LiteralPath $vhostDirectory)) { New-Item -ItemType Directory -Path $vhostDirectory | Out-Null }
+    $vhostContent = New-VHostContent -DocumentRoot $documentRoot -ConfigPath $configPath -HostName $ServerName -ListenPort $Port -LogsDirectory (Join-Path $apache 'logs')
+    [IO.File]::WriteAllText($vhost, $vhostContent, [Text.UTF8Encoding]::new($false))
+    $includePath = $vhost.Replace('\', '/')
+    if ($httpdOriginal -notmatch '(?im)^\s*Include\s+["'']?.*atlas-cmdb\.conf["'']?\s*$') {
+        [IO.File]::AppendAllText($httpdConfig, "`r`n# Atlas CMDB virtual host`r`nInclude `"$includePath`"`r`n", [Text.UTF8Encoding]::new($false))
+    }
+    $apacheConfigChanged = $true
+    Invoke-Native -FilePath $httpd -Arguments @('-t', '-f', $httpdConfig) -Description 'Az Apache konfigurációellenőrzése' | ForEach-Object { Write-Host $_ }
+
     if (Test-Path -LiteralPath $configPath) {
         Write-Host 'Adatbázis-migráció futtatása...'
-        Invoke-Native -FilePath $Php -Arguments @((Join-Path $target 'install.php')) -Description 'Az adatbázis-migráció' | ForEach-Object { Write-Host $_ }
-    } else {
-        Write-Host 'Még nincs konfiguráció; az első indítási telepítő fog megjelenni.'
-    }
+        Invoke-Native -FilePath $phpPath -Arguments @((Join-Path $target 'install.php')) -Description 'Az adatbázis-migráció' | ForEach-Object { Write-Host $_ }
+    } else { Write-Host 'Még nincs konfiguráció; az első indítási telepítő fog megjelenni.' }
 
     if (-not $NoRestart) {
-        $portOwner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-        if ($portOwner) { throw "A(z) $Port portot másik folyamat használja." }
-        $startAttempted = $true
-        Start-Atlas -Target $target -PhpPath $Php -ListenPort $Port -ConfigPath $configPath
-        Wait-Atlas -ListenPort $Port
-        Write-Host "Deploy kész, az Atlas elérhető: http://127.0.0.1:$Port/"
-    } else {
-        Write-Host 'Deploy kész. A -NoRestart miatt az alkalmazás nem indult el.'
-    }
+        Restart-Apache -ServiceName $ApacheServiceName
+        $storage = (& $phpPath (Join-Path $target 'console.php') storage-path)
+        if ($LASTEXITCODE -ne 0 -or -not $storage) { throw 'A worker tárolója nem kérdezhető le.' }
+        Start-AtlasWorker -Target $target -PhpPath $phpPath -Storage ([string]$storage).Trim() -HostName $ServerName -ListenPort $Port
+        $workerStarted = $true
+        $healthUrl = Wait-Atlas -HostName $ServerName -ListenPort $Port
+        Write-Host "Deploy kész, az Atlas elérhető: $($healthUrl -replace '/api\.php\?r=session$', '/')"
+    } else { Write-Host 'Deploy kész. A -NoRestart miatt az Apache és a worker nem indult újra.' }
 } catch {
     $failure = $_
-    if ($startAttempted -and (Test-Path -LiteralPath (Join-Path $target 'console.php'))) {
+    if ($workerStarted) {
         try {
-            $runtimeStorage = (& $Php (Join-Path $target 'console.php') storage-path)
-            if ($LASTEXITCODE -eq 0 -and $runtimeStorage) {
-                Stop-AtlasProcesses -Storage ([string]$runtimeStorage).Trim() -Target $target | Out-Null
-            }
-        } catch { Write-Warning "A sikertelen kiadás folyamatait nem sikerült leállítani: $($_.Exception.Message)" }
+            $runtimeStorage = (& $phpPath (Join-Path $target 'console.php') storage-path)
+            if ($LASTEXITCODE -eq 0 -and $runtimeStorage) { Stop-AtlasWorker -Storage ([string]$runtimeStorage).Trim() -Target $target | Out-Null }
+        } catch { Write-Warning "A sikertelen kiadás workerét nem sikerült leállítani: $($_.Exception.Message)" }
+    }
+    if ($apacheConfigChanged) {
+        try {
+            [IO.File]::WriteAllText($httpdConfig, $httpdOriginal, [Text.UTF8Encoding]::new($false))
+            if ($vhostExisted) { [IO.File]::WriteAllText($vhost, $vhostOriginal, [Text.UTF8Encoding]::new($false)) }
+            elseif (Test-Path -LiteralPath $vhost) { Remove-Item -LiteralPath $vhost }
+        } catch { Write-Warning "Az Apache-konfiguráció visszaállítása sem sikerült: $($_.Exception.Message)" }
     }
     if ($updated -and $previousCommit -and (Test-Path -LiteralPath (Join-Path $target '.git'))) {
-        Write-Warning "A deploy sikertelen; a kód visszaállítása erre a verzióra: $previousCommit"
         try { Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'reset', '--hard', $previousCommit) -Description 'A korábbi verzió visszaállítása' | Out-Null }
         catch { Write-Warning "A kód automatikus visszaállítása sem sikerült: $($_.Exception.Message)" }
     }
-    if ($stoppedProcesses -gt 0 -and -not $NoRestart) {
-        try { Start-Atlas -Target $target -PhpPath $Php -ListenPort $Port -ConfigPath $configPath }
-        catch { Write-Warning "A korábbi alkalmazás újraindítása sem sikerült: $($_.Exception.Message)" }
+    if (($workerStopped -or $workerStarted) -and -not $NoRestart -and (Test-Path -LiteralPath $configPath)) {
+        try {
+            Restart-Apache -ServiceName $ApacheServiceName
+            $runtimeStorage = (& $phpPath (Join-Path $target 'console.php') storage-path)
+            Start-AtlasWorker -Target $target -PhpPath $phpPath -Storage ([string]$runtimeStorage).Trim() -HostName $ServerName -ListenPort $Port
+        } catch { Write-Warning "A korábbi alkalmazás újraindítása sem sikerült: $($_.Exception.Message)" }
     }
     throw $failure
 } finally {

@@ -12,9 +12,9 @@ Ez a mappa a futtatásra kész alkalmazást és a szükséges PHP-függőségeke
 
 A privát konfiguráció, a titkosítási kulcs, a sessionök, az importok, exportok és mentések alapértelmezetten a `C:\xampp\Atlas-cmdb-private` mappába kerülnek, tehát a webes könyvtáron kívül maradnak.
 
-## Automatikus deploy és frissítés
+## Automatikus deploy és frissítés Apache 2.4 alatt
 
-A deploy script ellenőrzi a GitHub `main` ágat, meglévő konfigurációnál mentést készít, biztonságosan leállítja az Atlas folyamatait, frissíti a fájlokat, migrálja az adatbázist, újraindítja az alkalmazást, majd HTTP-állapotellenőrzést futtat.
+A deploy script a `C:\Apache24\htdocs\Atlas-cmdb` mappába telepít, létrehozza és beköti az Apache vhost fájlt, ellenőrzi az Apache-konfigurációt, meglévő rendszer esetén mentést készít, frissíti a fájlokat, migrálja az adatbázist, újraindítja az Apache szolgáltatást és az exportworkert, majd HTTP-állapotellenőrzést futtat.
 
 ```powershell
 # Csak ellenőrzés, módosítás nélkül
@@ -24,13 +24,21 @@ A deploy script ellenőrzi a GitHub `main` ágat, meglévő konfigurációnál m
 .\Deploy-AtlasCMDB.ps1
 ```
 
-Másik célmappa vagy port:
+Alapértelmezett cím: `http://atlas-cmdb.local/`. Ehhez adj `127.0.0.1 atlas-cmdb.local` sort a `C:\Windows\System32\drivers\etc\hosts` fájlhoz, vagy hozz létre helyi DNS-rekordot. Az Apache-ban a PHP-kezelőt és a `mod_env` modult előre be kell állítani. A scriptet rendszergazdai PowerShellből futtasd.
+
+Másik Apache-telepítés, célmappa vagy cím:
 
 ```powershell
-.\Deploy-AtlasCMDB.ps1 -TargetPath 'D:\Apps\Atlas-cmdb' -Port 8090
+.\Deploy-AtlasCMDB.ps1 `
+  -ApacheRoot 'D:\Apache24' `
+  -TargetPath 'D:\Apache24\htdocs\Atlas-cmdb' `
+  -ServerName 'atlas-cmdb.local' `
+  -Port 80
 ```
 
-Hasznos kapcsolók: `-Config`, `-Branch`, `-NoRestart`, `-SkipBackup`. A `-Force` csak akkor használható, ha a célmappában lévő helyi módosítások eldobása szándékos. A privát konfiguráció és az adatmentések nem kerülnek a Git repóba.
+Hasznos kapcsolók: `-VHostPath`, `-Config`, `-Branch`, `-ApacheServiceName`, `-NoRestart`, `-SkipBackup`. A `-Force` csak akkor használható, ha a célmappában lévő helyi módosítások eldobása szándékos. A privát konfiguráció és az adatmentések nem kerülnek a Git repóba.
+
+Kész vhost minta: `apache/atlas-cmdb.conf`. A deploy script alapértelmezetten a `C:\Apache24\conf\extra\atlas-cmdb.conf` fájlt generálja, és egyszer hozzáadja az `Include` sort a `httpd.conf` végéhez.
 
 Másik port vagy külön konfigurációs hely használata:
 

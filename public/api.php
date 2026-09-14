@@ -12,10 +12,18 @@ header("Content-Security-Policy: default-src 'none'; frame-ancestors 'none'");
 $requestId = bin2hex(random_bytes(8));
 try {
     if (!in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1','::1'])) {
-        throw new ApiError(403, 'Ez a fejlesztői példány csak helyben érhető el.');
+        throw new ApiError(403, 'Ez a helyi példány csak a webszerver gépéről érhető el.');
     }
-    if (!preg_match('/^(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/iD', $_SERVER['HTTP_HOST'] ?? '')) {
-        throw new ApiError(403, 'Az alkalmazást localhost vagy loopback címen nyisd meg.');
+    $requestHost = strtolower((string)preg_replace('/:\d+$/D', '', $_SERVER['HTTP_HOST'] ?? ''));
+    $allowedHosts = ['localhost','127.0.0.1','[::1]'];
+    foreach (explode(',', getenv('CMDB_ALLOWED_HOSTS') ?: '') as $allowedHost) {
+        $allowedHost = strtolower(trim($allowedHost));
+        if ($allowedHost !== '' && preg_match('/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:]+\])$/D', $allowedHost)) {
+            $allowedHosts[] = $allowedHost;
+        }
+    }
+    if (!in_array($requestHost, array_unique($allowedHosts), true)) {
+        throw new ApiError(403, 'A kért állomásnév nincs engedélyezve a CMDB_ALLOWED_HOSTS beállításban.');
     }
     if ((int)($_SERVER['CONTENT_LENGTH'] ?? 0) > 22 * 1024 * 1024) {
         throw new ApiError(413, 'Túl nagy kérés.');
