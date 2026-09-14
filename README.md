@@ -25,9 +25,12 @@ A deploy script a `C:\Apache24\htdocs\atlas` mappába telepít, létrehozza és 
 
 # Belső hálózati teszt a fejlesztői gép DNS-nevével
 .\Deploy-AtlasCMDB.ps1 -AllowRemote -ServerName 'FEJLESZTO-PC'
+
+# Ha az Apache szolgáltatás nem indítható újra a deploy során
+.\Deploy-AtlasCMDB.ps1 -AllowRemote -ServerName 'FEJLESZTO-PC' -NoRestart
 ```
 
-Alapértelmezett cím: `http://atlas-cmdb.local/`. Ehhez adj `127.0.0.1 atlas-cmdb.local` sort a `C:\Windows\System32\drivers\etc\hosts` fájlhoz, vagy hozz létre helyi DNS-rekordot. Az Apache-ban a PHP-kezelőt és a `mod_env` modult előre be kell állítani. A scriptet rendszergazdai PowerShellből futtasd.
+Alapértelmezett cím: `http://atlas-cmdb.local/`. Ehhez adj `127.0.0.1 atlas-cmdb.local` sort a `C:\Windows\System32\drivers\etc\hosts` fájlhoz, vagy hozz létre helyi DNS-rekordot. Az Apache-ban a PHP-kezelőt és a `mod_env` modult előre be kell állítani. A scriptet alaphelyzetben rendszergazdai PowerShellből futtasd. A `-NoRestart` mód rendszergazdai jog nélkül is használható, ha a futtató felhasználó írhatja az Apache és a célmappát; ilyenkor a vhost-konfiguráció csak az Apache szolgáltatás vagy a számítógép következő újraindítása után lép életbe, az exportworker pedig nem indul újra automatikusan.
 
 Másik Apache-telepítés, célmappa vagy cím:
 

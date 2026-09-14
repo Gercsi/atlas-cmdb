@@ -191,7 +191,13 @@ foreach ($required in @($apache, (Join-Path $apache 'htdocs'), (Join-Path $apach
 }
 $targetRoot = [IO.Path]::GetPathRoot($target).TrimEnd('\', '/')
 if (-not $target -or $target -eq $targetRoot) { throw 'A célmappa nem lehet meghajtógyökér.' }
-if (-not $DryRun -and -not (Test-Administrator)) { throw 'A deployt rendszergazdaként indított PowerShellből futtasd.' }
+$isAdministrator = Test-Administrator
+if (-not $DryRun -and -not $NoRestart -and -not $isAdministrator) {
+    throw 'A deployt rendszergazdaként indított PowerShellből futtasd, vagy használd a -NoRestart kapcsolót, ha az Apache újraindítása később történik.'
+}
+if (-not $DryRun -and $NoRestart -and -not $isAdministrator) {
+    Write-Warning 'Nem rendszergazdai deploy -NoRestart módban. Az Apache-konfiguráció csak a szolgáltatás vagy a számítógép következő újraindítása után lép életbe.'
+}
 
 Invoke-Native -FilePath $gitCommand.Source -Arguments @('ls-remote', '--exit-code', '--heads', $Repository, "refs/heads/$Branch") -Description 'A távoli ág ellenőrzése' | Out-Null
 $targetExists = Test-Path -LiteralPath $target
@@ -311,7 +317,9 @@ try {
         $workerStarted = $true
         $healthUrl = Wait-Atlas -HostName $ServerName -ListenPort $Port
         Write-Host "Deploy kész, az Atlas elérhető: $($healthUrl -replace '/api\.php\?r=session$', '/')"
-    } else { Write-Host 'Deploy kész. A -NoRestart miatt az Apache és a worker nem indult újra.' }
+    } else {
+        Write-Warning 'Deploy kész. A -NoRestart miatt az Apache és az exportworker nem indult újra. Az új vhost-konfiguráció a szolgáltatás vagy a számítógép következő újraindítása után lép életbe.'
+    }
 } catch {
     $failure = $_
     if ($workerStarted) {
