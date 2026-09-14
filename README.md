@@ -12,6 +12,26 @@ Ez a mappa a futtatásra kész alkalmazást és a szükséges PHP-függőségeke
 
 A privát konfiguráció, a titkosítási kulcs, a sessionök, az importok, exportok és mentések alapértelmezetten a `C:\xampp\Atlas-cmdb-private` mappába kerülnek, tehát a webes könyvtáron kívül maradnak.
 
+## Automatikus deploy és frissítés
+
+A deploy script ellenőrzi a GitHub `main` ágat, meglévő konfigurációnál mentést készít, biztonságosan leállítja az Atlas folyamatait, frissíti a fájlokat, migrálja az adatbázist, újraindítja az alkalmazást, majd HTTP-állapotellenőrzést futtat.
+
+```powershell
+# Csak ellenőrzés, módosítás nélkül
+.\Deploy-AtlasCMDB.ps1 -DryRun
+
+# Telepítés vagy frissítés
+.\Deploy-AtlasCMDB.ps1
+```
+
+Másik célmappa vagy port:
+
+```powershell
+.\Deploy-AtlasCMDB.ps1 -TargetPath 'D:\Apps\Atlas-cmdb' -Port 8090
+```
+
+Hasznos kapcsolók: `-Config`, `-Branch`, `-NoRestart`, `-SkipBackup`. A `-Force` csak akkor használható, ha a célmappában lévő helyi módosítások eldobása szándékos. A privát konfiguráció és az adatmentések nem kerülnek a Git repóba.
+
 Másik port vagy külön konfigurációs hely használata:
 
 ```powershell
