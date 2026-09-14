@@ -26,8 +26,18 @@ function Invoke-Native {
         [Parameter(Mandatory)][string[]]$Arguments,
         [Parameter(Mandatory)][string]$Description
     )
-    $output = @(& $FilePath @Arguments 2>&1)
-    if ($LASTEXITCODE -ne 0) {
+    # Windows PowerShell 5 hibarekorddá alakítja a natív programok stderr
+    # kimenetét. A Git sikeres fetch közben is ír ide, ezért kizárólag a
+    # folyamat valódi kilépési kódja dönthet a sikerről.
+    $previousPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $FilePath @Arguments 2>&1)
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($exitCode -ne 0) {
         throw "$Description sikertelen.`n$($output -join [Environment]::NewLine)"
     }
     return $output
