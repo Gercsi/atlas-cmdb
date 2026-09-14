@@ -125,7 +125,10 @@ final class Installer
             return ['success' => true, 'installation_required' => false, 'setup_required' => true];
         } catch (\PDOException $e) {
             // Never log SQL strings, DSNs, submitted passwords or account secrets.
-            error_log('CMDB installer stage='.$stage.' sqlstate='.$e->getCode());
+            $sqlState = (string)$e->getCode();
+            $driverCode = is_array($e->errorInfo ?? null) ? (int)($e->errorInfo[1] ?? 0) : 0;
+            $source = basename($e->getFile()).':'.$e->getLine();
+            error_log('CMDB installer stage='.$stage.' sqlstate='.$sqlState.' driver='.$driverCode.' source='.$source);
             if ($stage === 'database' && (int)($e->errorInfo[1] ?? 0) === 1007) {
                 throw new ApiError(409, 'Ez az adatbázis már létezik. Semmit nem módosítottunk benne. Válassz új adatbázisnevet.', ['database' => 'Már létező adatbázis nem használható az üres telepítéshez.']);
             }
@@ -138,6 +141,7 @@ final class Installer
             if ($createdDatabase) {
                 $message .= ' A most létrehozott, esetleg részleges adatbázist biztonságból megtartottuk. Új próbához válassz másik nevet, vagy az SQL-adminisztrátor ellenőrizze ezt a telepítést.';
             }
+            $message .= ' Diagnosztikai kód: '.$stage.'/'.$sqlState.'/'.$driverCode.'.';
             throw new ApiError(422, $message);
         } finally {
             if (is_string($temporaryConfig) && is_file($temporaryConfig)) {
