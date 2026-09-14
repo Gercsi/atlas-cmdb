@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [string]$Repository = 'https://github.com/Gercsi/atlas-cmdb.git',
     [ValidatePattern('^[A-Za-z0-9._/-]+$')][string]$Branch = 'main',
@@ -163,7 +163,7 @@ function Wait-Atlas {
 $gitCommand = Get-Command git -ErrorAction SilentlyContinue
 if (-not $gitCommand) { throw 'A Git nem található a PATH változóban.' }
 $apache = [IO.Path]::GetFullPath($ApacheRoot).TrimEnd('\', '/')
-$target = if ($TargetPath) { [IO.Path]::GetFullPath($TargetPath).TrimEnd('\', '/') } else { Join-Path $apache 'htdocs\Atlas-cmdb' }
+$target = if ($TargetPath) { [IO.Path]::GetFullPath($TargetPath).TrimEnd('\', '/') } else { Join-Path $apache 'htdocs\atlas' }
 $vhost = if ($VHostPath) { [IO.Path]::GetFullPath($VHostPath) } else { Join-Path $apache 'conf\extra\atlas-cmdb.conf' }
 $httpdConfig = Join-Path $apache 'conf\httpd.conf'
 $httpd = Join-Path $apache 'bin\httpd.exe'
@@ -181,8 +181,26 @@ if (-not $DryRun -and -not (Test-Administrator)) { throw 'A deployt rendszergazd
 Invoke-Native -FilePath $gitCommand.Source -Arguments @('ls-remote', '--exit-code', '--heads', $Repository, "refs/heads/$Branch") -Description 'A távoli ág ellenőrzése' | Out-Null
 $targetExists = Test-Path -LiteralPath $target
 $isRepository = $targetExists -and (Test-Path -LiteralPath (Join-Path $target '.git'))
+$targetIsEmpty = $false
+$hasExistingApp = $false
+$displacedTarget = ''
 if ($targetExists -and -not $isRepository) {
-    throw "A célmappa létezik, de nem Git-repó: $target. Helyezd át, vagy válassz másik TargetPath értéket."
+    $targetIsEmpty = @(Get-ChildItem -LiteralPath $target -Force).Count -eq 0
+    $hasExistingApp = (Test-Path -LiteralPath (Join-Path $target 'vendor\autoload.php')) -and
+        (Test-Path -LiteralPath (Join-Path $target 'backup.php')) -and
+        (Test-Path -LiteralPath (Join-Path $target 'console.php'))
+    if (-not $targetIsEmpty -and -not $Force) {
+        throw "A célmappa nem üres és nem Git-repó: $target. A biztonságos cseréhez futtasd újra -Force kapcsolóval; a telepítő előbb átnevezi és megőrzi a teljes jelenlegi mappát."
+    }
+    if (-not $targetIsEmpty) {
+        $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+        $displacedTarget = "$target.predeploy-$stamp"
+        $suffix = 1
+        while (Test-Path -LiteralPath $displacedTarget) {
+            $displacedTarget = "$target.predeploy-$stamp-$suffix"
+            $suffix++
+        }
+    }
 }
 if ($isRepository) {
     $origin = (Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'remote', 'get-url', 'origin') -Description 'A távoli repó lekérdezése' | Select-Object -First 1).Trim()
@@ -197,6 +215,8 @@ Write-Host "Cél: $target"
 Write-Host "VHost: $vhost"
 Write-Host "Cím: http://$ServerName$(if ($Port -eq 80) { '' } else { ":$Port" })/"
 Write-Host "Konfiguráció: $configPath"
+if ($targetExists -and -not $isRepository -and $targetIsEmpty) { Write-Host 'A létező célmappa üres; az alkalmazás közvetlenül ide települ.' }
+if ($displacedTarget) { Write-Host "A jelenlegi, nem Git-alapú mappa biztonsági másolata: $displacedTarget" }
 if ($DryRun) { Write-Host 'DryRun: az előfeltételek rendben vannak; nem történt módosítás.'; exit 0 }
 
 $mutex = [Threading.Mutex]::new($false, 'Local\AtlasCMDBApacheDeploy')
@@ -207,6 +227,7 @@ $previousCommit = ''
 $updated = $false
 $workerStopped = $false
 $workerStarted = $false
+$previousTargetMoved = $false
 $apacheConfigChanged = $false
 $vhostExisted = Test-Path -LiteralPath $vhost
 $vhostOriginal = if ($vhostExisted) { [IO.File]::ReadAllText($vhost) } else { '' }
@@ -214,6 +235,15 @@ $httpdOriginal = [IO.File]::ReadAllText($httpdConfig)
 
 try {
     $env:CMDB_CONFIG = $configPath
+    if (-not $isRepository -and $hasExistingApp) {
+        if ((Test-Path -LiteralPath $configPath) -and -not $SkipBackup) {
+            Write-Host 'A meglévő alkalmazás adatbázis- és konfigurációmentésének elkészítése...'
+            Invoke-Native -FilePath $phpPath -Arguments @('-d', 'extension=zip', '-d', 'extension=gd', (Join-Path $target 'backup.php')) -Description 'A telepítés előtti mentés' | ForEach-Object { Write-Host $_ }
+        }
+        $storage = (& $phpPath (Join-Path $target 'console.php') storage-path)
+        if ($LASTEXITCODE -ne 0 -or -not $storage) { throw 'A meglévő alkalmazás privát tárolóútvonala nem kérdezhető le.' }
+        $workerStopped = Stop-AtlasWorker -Storage ([string]$storage).Trim() -Target $target
+    }
     if ($isRepository) {
         $previousCommit = (Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'rev-parse', 'HEAD') -Description 'Az aktuális verzió lekérdezése' | Select-Object -First 1).Trim()
         if ((Test-Path -LiteralPath $configPath) -and -not $SkipBackup) {
@@ -228,6 +258,11 @@ try {
         if ($Force) { Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'clean', '-fd') -Description 'Az idegen fájlok eltávolítása' | ForEach-Object { Write-Host $_ } }
         $updated = $true
     } else {
+        if ($displacedTarget) {
+            Write-Host "A jelenlegi célmappa megőrzése itt: $displacedTarget"
+            Move-Item -LiteralPath $target -Destination $displacedTarget
+            $previousTargetMoved = $true
+        }
         Invoke-Native -FilePath $gitCommand.Source -Arguments @('clone', '--depth', '1', '--branch', $Branch, '--single-branch', $Repository, $target) -Description 'Az alkalmazás letöltése' | ForEach-Object { Write-Host $_ }
         $updated = $true
     }
@@ -279,6 +314,17 @@ try {
     if ($updated -and $previousCommit -and (Test-Path -LiteralPath (Join-Path $target '.git'))) {
         try { Invoke-Native -FilePath $gitCommand.Source -Arguments @('-C', $target, 'reset', '--hard', $previousCommit) -Description 'A korábbi verzió visszaállítása' | Out-Null }
         catch { Write-Warning "A kód automatikus visszaállítása sem sikerült: $($_.Exception.Message)" }
+    }
+    if ($previousTargetMoved -and (Test-Path -LiteralPath $displacedTarget)) {
+        try {
+            $targetParent = [IO.Path]::GetFullPath((Split-Path -Parent $target)).TrimEnd('\', '/')
+            $backupParent = [IO.Path]::GetFullPath((Split-Path -Parent $displacedTarget)).TrimEnd('\', '/')
+            if ((Normalize-Path $targetParent) -ne (Normalize-Path $backupParent)) { throw 'A visszaállítási mappák szülőútvonala eltér.' }
+            if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force }
+            Move-Item -LiteralPath $displacedTarget -Destination $target
+            $previousTargetMoved = $false
+            Write-Warning 'A sikertelen telepítés után a korábbi célmappa visszaállt.'
+        } catch { Write-Warning "A korábbi célmappa automatikus visszaállítása sem sikerült: $($_.Exception.Message)" }
     }
     if (($workerStopped -or $workerStarted) -and -not $NoRestart -and (Test-Path -LiteralPath $configPath)) {
         try {

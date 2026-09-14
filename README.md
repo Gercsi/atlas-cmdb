@@ -14,7 +14,7 @@ A privát konfiguráció, a titkosítási kulcs, a sessionök, az importok, expo
 
 ## Automatikus deploy és frissítés Apache 2.4 alatt
 
-A deploy script a `C:\Apache24\htdocs\Atlas-cmdb` mappába telepít, létrehozza és beköti az Apache vhost fájlt, ellenőrzi az Apache-konfigurációt, meglévő rendszer esetén mentést készít, frissíti a fájlokat, migrálja az adatbázist, újraindítja az Apache szolgáltatást és az exportworkert, majd HTTP-állapotellenőrzést futtat.
+A deploy script a `C:\Apache24\htdocs\atlas` mappába telepít, létrehozza és beköti az Apache vhost fájlt, ellenőrzi az Apache-konfigurációt, meglévő rendszer esetén mentést készít, frissíti a fájlokat, migrálja az adatbázist, újraindítja az Apache szolgáltatást és az exportworkert, majd HTTP-állapotellenőrzést futtat. A már létező üres célmappát elfogadja. Nem üres, Git nélküli célmappát csak `-Force` használatakor cserél le, és előtte időbélyeges `.predeploy-*` biztonsági másolatként megőrzi.
 
 ```powershell
 # Csak ellenőrzés, módosítás nélkül
@@ -31,12 +31,12 @@ Másik Apache-telepítés, célmappa vagy cím:
 ```powershell
 .\Deploy-AtlasCMDB.ps1 `
   -ApacheRoot 'D:\Apache24' `
-  -TargetPath 'D:\Apache24\htdocs\Atlas-cmdb' `
+  -TargetPath 'D:\Apache24\htdocs\atlas' `
   -ServerName 'atlas-cmdb.local' `
   -Port 80
 ```
 
-Hasznos kapcsolók: `-VHostPath`, `-Config`, `-Branch`, `-ApacheServiceName`, `-NoRestart`, `-SkipBackup`. A `-Force` csak akkor használható, ha a célmappában lévő helyi módosítások eldobása szándékos. A privát konfiguráció és az adatmentések nem kerülnek a Git repóba.
+Hasznos kapcsolók: `-VHostPath`, `-Config`, `-Branch`, `-ApacheServiceName`, `-NoRestart`, `-SkipBackup`. A `-Force` Git-repóban a helyi módosítások eldobását engedélyezi; nem Git-alapú, nem üres célmappánál a régi mappát biztonsági másolatba helyezi. A privát konfiguráció és az adatmentések nem kerülnek a Git repóba.
 
 Kész vhost minta: `apache/atlas-cmdb.conf`. A deploy script alapértelmezetten a `C:\Apache24\conf\extra\atlas-cmdb.conf` fájlt generálja, és egyszer hozzáadja az `Include` sort a `httpd.conf` végéhez.
 
