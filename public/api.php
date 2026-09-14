@@ -241,7 +241,7 @@ try {
             $reply((new Importer($a))->commit($parts[1]));
             exit;
         }if ($method === 'GET') {
-            $reply(['data' => $a->all('SELECT id,file_hash,profile,status,created_at FROM imports ORDER BY created_at DESC'),'staging' => $a->all("SELECT public_id,sheet,row_number,raw_values FROM import_rows WHERE disposition='staging'")]);
+            $reply(['data' => $a->all('SELECT id,file_hash,profile,status,created_at FROM imports ORDER BY created_at DESC'),'staging' => $a->all("SELECT public_id,sheet,`row_number`,raw_values FROM import_rows WHERE disposition='staging'")]);
             exit;
         }
     }
