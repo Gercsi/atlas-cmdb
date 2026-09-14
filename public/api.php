@@ -11,7 +11,8 @@ header('Referrer-Policy: same-origin');
 header("Content-Security-Policy: default-src 'none'; frame-ancestors 'none'");
 $requestId = bin2hex(random_bytes(8));
 try {
-    if (!in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1','::1'])) {
+    $allowRemote = filter_var(getenv('CMDB_ALLOW_REMOTE') ?: '0', FILTER_VALIDATE_BOOLEAN);
+    if (!$allowRemote && !in_array($_SERVER['REMOTE_ADDR'] ?? '', ['127.0.0.1','::1'])) {
         throw new ApiError(403, 'Ez a helyi példány csak a webszerver gépéről érhető el.');
     }
     $requestHost = strtolower((string)preg_replace('/:\d+$/D', '', $_SERVER['HTTP_HOST'] ?? ''));

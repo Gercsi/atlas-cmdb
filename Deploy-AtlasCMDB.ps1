@@ -10,6 +10,7 @@ param(
     [string]$Config = '',
     [string]$Php = '',
     [string]$ApacheServiceName = 'Apache2.4',
+    [switch]$AllowRemote,
     [switch]$SkipBackup,
     [switch]$NoRestart,
     [switch]$Force,
@@ -108,11 +109,14 @@ function New-VHostContent {
         [Parameter(Mandatory)][string]$ConfigPath,
         [Parameter(Mandatory)][string]$HostName,
         [Parameter(Mandatory)][int]$ListenPort,
-        [Parameter(Mandatory)][string]$LogsDirectory
+        [Parameter(Mandatory)][string]$LogsDirectory,
+        [Parameter(Mandatory)][bool]$RemoteAccess
     )
     $document = $DocumentRoot.Replace('\', '/')
     $configuration = $ConfigPath.Replace('\', '/')
     $logs = $LogsDirectory.Replace('\', '/')
+    $remoteValue = if ($RemoteAccess) { '1' } else { '0' }
+    $accessRequirement = if ($RemoteAccess) { 'Require all granted' } else { 'Require local' }
     return @"
 # Atlas CMDB virtual host
 # A PHP-kezelőt (mod_php vagy FastCGI) az Apache globális konfigurációjában kell beállítani.
@@ -123,11 +127,12 @@ function New-VHostContent {
 
     SetEnv CMDB_CONFIG "$configuration"
     SetEnv CMDB_ALLOWED_HOSTS "$HostName"
+    SetEnv CMDB_ALLOW_REMOTE "$remoteValue"
 
     <Directory "$document">
         Options -Indexes
         AllowOverride All
-        Require local
+        $accessRequirement
     </Directory>
 
     ErrorLog "$logs/atlas-cmdb-error.log"
@@ -215,6 +220,7 @@ Write-Host "Cél: $target"
 Write-Host "VHost: $vhost"
 Write-Host "Cím: http://$ServerName$(if ($Port -eq 80) { '' } else { ":$Port" })/"
 Write-Host "Konfiguráció: $configPath"
+Write-Host "Távoli elérés: $(if ($AllowRemote) { 'engedélyezve' } else { 'csak a webszerverről' })"
 if ($targetExists -and -not $isRepository -and $targetIsEmpty) { Write-Host 'A létező célmappa üres; az alkalmazás közvetlenül ide települ.' }
 if ($displacedTarget) { Write-Host "A jelenlegi, nem Git-alapú mappa biztonsági másolata: $displacedTarget" }
 if ($DryRun) { Write-Host 'DryRun: az előfeltételek rendben vannak; nem történt módosítás.'; exit 0 }
@@ -273,7 +279,7 @@ try {
 
     $vhostDirectory = Split-Path -Parent $vhost
     if (-not (Test-Path -LiteralPath $vhostDirectory)) { New-Item -ItemType Directory -Path $vhostDirectory | Out-Null }
-    $vhostContent = New-VHostContent -DocumentRoot $documentRoot -ConfigPath $configPath -HostName $ServerName -ListenPort $Port -LogsDirectory (Join-Path $apache 'logs')
+    $vhostContent = New-VHostContent -DocumentRoot $documentRoot -ConfigPath $configPath -HostName $ServerName -ListenPort $Port -LogsDirectory (Join-Path $apache 'logs') -RemoteAccess ([bool]$AllowRemote)
     [IO.File]::WriteAllText($vhost, $vhostContent, [Text.UTF8Encoding]::new($false))
     $includePath = $vhost.Replace('\', '/')
     if ($httpdOriginal -notmatch '(?im)^\s*Include\s+["'']?.*atlas-cmdb\.conf["'']?\s*$') {
