@@ -131,6 +131,7 @@ try {
     if ($path === 'session' && $method === 'GET') {
         $u = $a->user;
         if ($u) {
+            $u['sso_identity'] = (bool)$a->one('SELECT EXISTS(SELECT 1 FROM user_identities WHERE user_id=?) linked', [$u['id']])['linked'];
             unset($u['password_hash']);
         }
         $ssoError = $_SESSION['sso_error'] ?? null;
@@ -170,6 +171,46 @@ try {
     }
     if (!$a->user) {
         throw new ApiError(401, 'Bejelentkezés szükséges.');
+    }
+    if ($path === 'account/password' && $method === 'PUT') {
+        $currentPassword = $body['current_password'] ?? null;
+        $newPassword = $body['new_password'] ?? null;
+        $confirmation = $body['new_password_confirmation'] ?? null;
+        $fields = [];
+        if (!is_string($currentPassword) || $currentPassword === '') {
+            $fields['current_password'] = 'Add meg a jelenlegi jelszavadat.';
+        }
+        if (!is_string($newPassword) || strlen($newPassword) < 12 || strlen($newPassword) > 72) {
+            $fields['new_password'] = 'Az új jelszó 12–72 karakter hosszú legyen.';
+        }
+        if (!is_string($confirmation) || $confirmation !== $newPassword) {
+            $fields['new_password_confirmation'] = 'A két új jelszó nem egyezik.';
+        }
+        if ($fields) {
+            throw new ApiError(422, 'Ellenőrizd a jelszómezőket.', $fields);
+        }
+        $bucket = hash('sha256', 'password-change|'.$a->user['id'].'|'.($_SERVER['REMOTE_ADDR'] ?? ''));
+        $attempt = $a->one('SELECT * FROM login_attempts WHERE bucket=?', [$bucket]);
+        if ($attempt && (int)$attempt['reset_at'] > time() && (int)$attempt['attempts'] >= 8) {
+            throw new ApiError(429, 'Túl sok hibás jelszópróba. Várj 15 percet.');
+        }
+        $credentials = $a->one('SELECT password_hash FROM users WHERE id=? AND active=1', [$a->user['id']]);
+        if (!$credentials || !password_verify($currentPassword, $credentials['password_hash'])) {
+            $a->run('INSERT INTO login_attempts VALUES (?,1,?) ON DUPLICATE KEY UPDATE attempts=IF(reset_at<UNIX_TIMESTAMP(),1,attempts+1),reset_at=IF(reset_at<UNIX_TIMESTAMP(),VALUES(reset_at),reset_at)', [$bucket,time() + 900]);
+            throw new ApiError(422, 'A jelenlegi jelszó hibás.', ['current_password' => 'A jelenlegi jelszó hibás.']);
+        }
+        if (password_verify($newPassword, $credentials['password_hash'])) {
+            throw new ApiError(422, 'Az új jelszó nem egyezhet meg a jelenlegivel.', ['new_password' => 'Válassz másik jelszót.']);
+        }
+        $a->tx(function () use ($a, $newPassword, $bucket) {
+            $a->run('UPDATE users SET password_hash=? WHERE id=?', [password_hash($newPassword, PASSWORD_DEFAULT),$a->user['id']]);
+            $a->run('DELETE FROM login_attempts WHERE bucket=?', [$bucket]);
+            $a->audit('password_change', 'users', $a->user['id']);
+        });
+        session_regenerate_id(true);
+        $_SESSION['csrf'] = bin2hex(random_bytes(32));
+        $reply(['success' => true,'csrf' => $_SESSION['csrf']]);
+        exit;
     }
     require __DIR__.'/extra-routes.php';
     if ($path === 'health') {
@@ -281,13 +322,76 @@ try {
         }$resource = $parts[1] ?? '';
         if ($resource === 'users') {
             if ($method === 'GET') {
-                $reply(['data' => $a->all('SELECT u.id,u.username,u.role,u.capabilities,u.active,EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id) AS sso_identity FROM users u')]);
+                $rows = $a->all('SELECT u.id,u.username,u.role,u.capabilities,u.active,EXISTS(SELECT 1 FROM user_identities i WHERE i.user_id=u.id) AS sso_identity FROM users u ORDER BY u.username');
+                foreach ($rows as &$row) {
+                    $row['capabilities'] = json_decode($row['capabilities'], true) ?: [];
+                    $row['active'] = (bool)$row['active'];
+                    $row['sso_identity'] = (bool)$row['sso_identity'];
+                }
+                unset($row);
+                $reply(['data' => $rows]);
                 exit;
-            }if (strlen($body['password'] ?? '') < 12 || !in_array($body['role'] ?? '', ['viewer','editor','admin'])) {
-                throw new ApiError(422, 'Érvényes szerep és legalább 12 karakteres jelszó szükséges.');
-            }$a->run('INSERT INTO users VALUES (?,?,?,?,?,1)', [App::id(),$body['username'],password_hash($body['password'], PASSWORD_DEFAULT),$body['role'],json_encode(array_values(array_intersect($body['capabilities'] ?? [], ['import_data','export_data','export_diagram','view_contact_details'])))]);
-            $reply(['success' => true]);
-            exit;
+            }
+            $allowedCapabilities = ['import_data','export_data','export_diagram','view_contact_details'];
+            $role = $body['role'] ?? '';
+            $capabilities = is_array($body['capabilities'] ?? null)
+                ? array_values(array_unique(array_intersect(
+                    array_values(array_filter($body['capabilities'], 'is_string')),
+                    $allowedCapabilities
+                )))
+                : [];
+            if (!in_array($role, ['viewer','editor','admin'], true)) {
+                throw new ApiError(422, 'Érvényes szerep szükséges.', ['role' => 'Válassz érvényes szerepet.']);
+            }
+            if ($method === 'POST' && !isset($parts[2])) {
+                $username = $body['username'] ?? null;
+                $newPassword = $body['password'] ?? null;
+                $fields = [];
+                if (!is_string($username) || !preg_match('/^[A-Za-z0-9._-]{3,100}$/D', $username)) {
+                    $fields['username'] = 'A felhasználónév 3–100 karakteres lehet, betűvel, számmal, ponttal, aláhúzással vagy kötőjellel.';
+                } elseif ($a->one('SELECT id FROM users WHERE username=?', [$username])) {
+                    $fields['username'] = 'Ez a felhasználónév már foglalt.';
+                }
+                if (!is_string($newPassword) || strlen($newPassword) < 12 || strlen($newPassword) > 72) {
+                    $fields['password'] = 'A jelszó 12–72 karakter hosszú legyen.';
+                }
+                if ($fields) {
+                    throw new ApiError(422, 'Ellenőrizd a felhasználó adatait.', $fields);
+                }
+                $id = App::id();
+                $after = ['username' => $username,'role' => $role,'capabilities' => $capabilities,'active' => true];
+                $a->tx(function () use ($a, $id, $username, $newPassword, $role, $capabilities, $after) {
+                    $a->run('INSERT INTO users VALUES (?,?,?,?,?,1)', [$id,$username,password_hash($newPassword, PASSWORD_DEFAULT),$role,json_encode($capabilities, JSON_THROW_ON_ERROR)]);
+                    $a->audit('user_create', 'users', $id, [], $after);
+                });
+                $reply(['success' => true,'id' => $id], 201);
+                exit;
+            }
+            if ($method === 'PATCH' && isset($parts[2])) {
+                $id = $parts[2];
+                $active = filter_var($body['active'] ?? false, FILTER_VALIDATE_BOOLEAN);
+                $updated = $a->tx(function () use ($a, $id, $role, $capabilities, $active) {
+                    $before = $a->one('SELECT id,username,role,capabilities,active FROM users WHERE id=? FOR UPDATE', [$id]);
+                    if (!$before) {
+                        throw new ApiError(404, 'A felhasználó nem található.');
+                    }
+                    if ($id === $a->user['id'] && ($role !== $before['role'] || !$active)) {
+                        throw new ApiError(422, 'A saját admin szerepedet és aktív állapotodat itt nem módosíthatod.');
+                    }
+                    $after = ['username' => $before['username'],'role' => $role,'capabilities' => $capabilities,'active' => $active];
+                    $a->run('UPDATE users SET role=?,capabilities=?,active=? WHERE id=?', [$role,json_encode($capabilities, JSON_THROW_ON_ERROR),(int)$active,$id]);
+                    if (!(int)$a->db->query("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1")->fetchColumn()) {
+                        throw new ApiError(422, 'Legalább egy aktív adminisztrátornak maradnia kell.');
+                    }
+                    $before['capabilities'] = json_decode($before['capabilities'], true) ?: [];
+                    $before['active'] = (bool)$before['active'];
+                    $a->audit('user_update', 'users', $id, $before, $after);
+                    return $after;
+                });
+                $reply(['success' => true,'user' => $updated]);
+                exit;
+            }
+            throw new ApiError(405, 'Nem támogatott felhasználói művelet.');
         }
         if ($resource === 'references') {
             if ($method === 'GET') {
